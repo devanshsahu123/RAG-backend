@@ -119,5 +119,32 @@ const downloadDocument = async (req, res, next) => {
     next(err);
   }
 };
+// DELETE /api/upload/documents/:id - delete a specific document
+const deleteDocument = async (req, res, next) => {
+  try {
+    const documentId = req.params.id;
+    const document = await Document.findOne({ _id: documentId, userId: req.user.id });
 
-module.exports = { uploadDocument, getDocuments, downloadDocument };
+    if (!document) {
+      return res.status(404).json({ status: 'error', message: 'Document not found or unauthorized' });
+    }
+
+    // Try to delete physical file ignoring errors if it's already gone
+    try {
+      if (fs.existsSync(document.path)) {
+        fs.unlinkSync(document.path);
+      }
+    } catch (fsErr) {
+      console.error('Error removing file from disk:', fsErr);
+    }
+
+    // Remove from DB
+    await Document.findByIdAndDelete(documentId);
+
+    res.status(200).json({ status: 'success', message: 'Document deleted successfully' });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { uploadDocument, getDocuments, downloadDocument, deleteDocument };
