@@ -3,6 +3,7 @@ const router = express.Router();
 const controller = require('../controllers');
 const authRoutes = require('./auth');
 const uploadRoutes = require('./upload');
+const chatRoutes = require('./chat');
 
 
 
@@ -14,5 +15,8 @@ router.use('/auth', authRoutes);
 
 // Upload routes  →  /api/upload  /api/upload/documents
 router.use('/upload', uploadRoutes);
+
+// Chat routes
+router.use('/chat', chatRoutes);
 
 module.exports = router;

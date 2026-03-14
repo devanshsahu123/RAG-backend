@@ -2,6 +2,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const Document = require('../models/Document');
+const pdfParse = require('pdf-parse');
 
 // ── Multer storage config ──────────────────────────────────────
 const uploadsDir = path.join(__dirname, '../../uploads');
@@ -29,16 +30,19 @@ const upload = multer({
   limits: { fileSize: 50 * 1024 * 1024 }, // 50 MB
 });
 
-// ── Controller ─────────────────────────────────────────────────
-// POST /api/upload   (auth required)
+// ── POST /api/upload ─────────────────────────────────────────────
 const uploadDocument = [
   upload.single('file'),
   async (req, res, next) => {
     try {
       if (!req.file) {
-        return res.status(400).json({ status: 'error', message: 'No file uploaded or invalid file type.' });
+        return res.status(400).json({
+          status: 'error',
+          message: 'No file uploaded or invalid file type. Only PDF files are accepted.',
+        });
       }
 
+      // 1. Save document record with "processing" status
       const doc = await Document.create({
         userId: req.user.id,
         filename: req.file.filename,
@@ -46,21 +50,61 @@ const uploadDocument = [
         size: req.file.size,
         mimetype: req.file.mimetype,
         path: req.file.path,
-        status: 'uploaded',
+        status: 'processing',
       });
 
+      // 2. Respond immediately — don't block on PDF parsing
       res.status(201).json({
         status: 'success',
-        message: 'File uploaded successfully.',
+        message: 'File uploaded successfully. Text extraction is in progress.',
         data: { document: doc },
       });
+
+      // 3. Extract text from PDF asynchronously (after response is sent)
+      processPdf(doc._id, req.file.path);
+
     } catch (err) {
       next(err);
     }
   },
 ];
 
-// GET /api/upload/documents  – list documents for authenticated user (with pagination)
+/**
+ * Parses the PDF, stores the extracted text in MongoDB, and sets the status to "ready".
+ * Runs asynchronously after the HTTP response has already been sent.
+ */
+async function processPdf(documentId, filePath) {
+  try {
+    if (!fs.existsSync(filePath)) {
+      console.error(`[processPdf] File not found: ${filePath}`);
+      await Document.findByIdAndUpdate(documentId, { status: 'error' });
+      return;
+    }
+
+    const dataBuffer = fs.readFileSync(filePath);
+    const pdfData = await pdfParse(dataBuffer);
+
+    const extractedText = pdfData.text || '';
+    const pageCount = pdfData.numpages || 0;
+
+    if (extractedText.trim().length === 0) {
+      console.warn(`[processPdf] No text extracted from document ${documentId}. May be a scanned PDF.`);
+    }
+
+    await Document.findByIdAndUpdate(documentId, {
+      status: 'ready',
+      extractedText,
+      pageCount,
+    });
+
+    console.log(`[processPdf] Done: doc_id=${documentId}, pages=${pageCount}, chars=${extractedText.length}`);
+  } catch (error) {
+    console.error(`[processPdf] Error processing document ${documentId}:`, error.message);
+    await Document.findByIdAndUpdate(documentId, { status: 'error' });
+  }
+}
+
+// ── GET /api/upload/documents ─────────────────────────────────────
 const getDocuments = async (req, res, next) => {
   try {
     const page = parseInt(req.query.page, 10) || 1;
@@ -70,78 +114,75 @@ const getDocuments = async (req, res, next) => {
     const query = { userId: req.user.id };
 
     const totalDocuments = await Document.countDocuments(query);
-    const documents = await Document.find(query)
+    // Exclude the potentially large extractedText field from the list response
+    const documents = await Document.find(query, { extractedText: 0 })
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit);
 
-    res.status(200).json({ 
-      status: 'success', 
-      data: { 
+    res.status(200).json({
+      status: 'success',
+      data: {
         documents,
         pagination: {
           total: totalDocuments,
           page,
           limit,
           totalPages: Math.ceil(totalDocuments / limit),
-          hasMore: skip + documents.length < totalDocuments
-        }
-      } 
+          hasMore: skip + documents.length < totalDocuments,
+        },
+      },
     });
   } catch (err) {
     next(err);
   }
 };
-// GET /api/upload/documents/:id/download - download a specific document
+
+// ── GET /api/upload/documents/:id/download ─────────────────────────
 const downloadDocument = async (req, res, next) => {
   try {
-    const documentId = req.params.id;
-    const document = await Document.findOne({ _id: documentId, userId: req.user.id });
+    const document = await Document.findOne({ _id: req.params.id, userId: req.user.id });
 
     if (!document) {
-      return res.status(404).json({ status: 'error', message: 'Document not found or unauthorized' });
+      return res.status(404).json({ status: 'error', message: 'Document not found or unauthorized.' });
     }
 
     if (!fs.existsSync(document.path)) {
-      return res.status(404).json({ status: 'error', message: 'File no longer exists on server' });
+      return res.status(404).json({ status: 'error', message: 'File no longer exists on the server.' });
     }
 
-    // Set the proper headers and download the file
     res.download(document.path, document.originalName, (err) => {
-      if (err) {
+      if (err && !res.headersSent) {
         console.error('Download error:', err);
-        if (!res.headersSent) {
-          res.status(500).json({ status: 'error', message: 'Error downloading file' });
-        }
+        res.status(500).json({ status: 'error', message: 'Error downloading file.' });
       }
     });
   } catch (err) {
     next(err);
   }
 };
-// DELETE /api/upload/documents/:id - delete a specific document
+
+// ── DELETE /api/upload/documents/:id ──────────────────────────────
 const deleteDocument = async (req, res, next) => {
   try {
-    const documentId = req.params.id;
-    const document = await Document.findOne({ _id: documentId, userId: req.user.id });
+    const document = await Document.findOne({ _id: req.params.id, userId: req.user.id });
 
     if (!document) {
-      return res.status(404).json({ status: 'error', message: 'Document not found or unauthorized' });
+      return res.status(404).json({ status: 'error', message: 'Document not found or unauthorized.' });
     }
 
-    // Try to delete physical file ignoring errors if it's already gone
+    // Remove physical file from disk (ignore error if already gone)
     try {
       if (fs.existsSync(document.path)) {
         fs.unlinkSync(document.path);
       }
     } catch (fsErr) {
-      console.error('Error removing file from disk:', fsErr);
+      console.error('Error removing file from disk:', fsErr.message);
     }
 
-    // Remove from DB
-    await Document.findByIdAndDelete(documentId);
+    await Document.findByIdAndDelete(req.params.id);
 
-    res.status(200).json({ status: 'success', message: 'Document deleted successfully' });
+    res.status(200).json({ status: 'success', message: 'Document deleted successfully.' });
   } catch (err) {
     next(err);
   }

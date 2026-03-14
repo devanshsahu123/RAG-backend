@@ -1,16 +1,17 @@
-const vectorDbService = require('../services/vectorDbService');
+// Health check / status controller
 
-// Example controller to health check the vector DB
-const getVectorDbStatus = async (req, res, next) => {
-  try {
-    // A simple mock try to get the index stats or just return OK if initialized
-    const status = await vectorDbService.checkStatus();
-    res.status(200).json({ status: 'success', data: status });
-  } catch (error) {
-    next(error);
-  }
+const getVectorDbStatus = async (req, res) => {
+  // Pinecone is no longer required. Return a simple status message.
+  res.status(200).json({
+    status: 'success',
+    data: {
+      message: 'Vector DB is not configured. The app uses MongoDB + Gemini for RAG.',
+      connected: false,
+    },
+  });
 };
 
 module.exports = {
   getVectorDbStatus,
 };
+

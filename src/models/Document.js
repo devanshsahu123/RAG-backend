@@ -31,6 +31,15 @@ const documentSchema = new mongoose.Schema(
     path: {
       type: String, // disk path where multer saved it
     },
+    // Stores the full extracted text from the PDF for RAG queries (no vector DB required)
+    extractedText: {
+      type: String,
+      default: '',
+    },
+    pageCount: {
+      type: Number,
+      default: 0,
+    },
   },
   { timestamps: true }
 );
