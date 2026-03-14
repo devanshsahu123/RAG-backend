@@ -60,14 +60,64 @@ const uploadDocument = [
   },
 ];
 
-// GET /api/upload/documents  – list documents for authenticated user
+// GET /api/upload/documents  – list documents for authenticated user (with pagination)
 const getDocuments = async (req, res, next) => {
   try {
-    const documents = await Document.find({ userId: req.user.id }).sort({ createdAt: -1 });
-    res.status(200).json({ status: 'success', data: { documents } });
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 20;
+    const skip = (page - 1) * limit;
+
+    const query = { userId: req.user.id };
+
+    const totalDocuments = await Document.countDocuments(query);
+    const documents = await Document.find(query)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    res.status(200).json({ 
+      status: 'success', 
+      data: { 
+        documents,
+        pagination: {
+          total: totalDocuments,
+          page,
+          limit,
+          totalPages: Math.ceil(totalDocuments / limit),
+          hasMore: skip + documents.length < totalDocuments
+        }
+      } 
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+// GET /api/upload/documents/:id/download - download a specific document
+const downloadDocument = async (req, res, next) => {
+  try {
+    const documentId = req.params.id;
+    const document = await Document.findOne({ _id: documentId, userId: req.user.id });
+
+    if (!document) {
+      return res.status(404).json({ status: 'error', message: 'Document not found or unauthorized' });
+    }
+
+    if (!fs.existsSync(document.path)) {
+      return res.status(404).json({ status: 'error', message: 'File no longer exists on server' });
+    }
+
+    // Set the proper headers and download the file
+    res.download(document.path, document.originalName, (err) => {
+      if (err) {
+        console.error('Download error:', err);
+        if (!res.headersSent) {
+          res.status(500).json({ status: 'error', message: 'Error downloading file' });
+        }
+      }
+    });
   } catch (err) {
     next(err);
   }
 };
 
-module.exports = { uploadDocument, getDocuments };
+module.exports = { uploadDocument, getDocuments, downloadDocument };
