@@ -57,7 +57,7 @@ const chatWithDocument = async (req, res, next) => {
         message: 'No text could be extracted from this document. It may be a scanned image PDF.',
       });
     }
-
+// console.log(doc.extractedText,"this is an resppnonse data ")
     // --- Generate AI Response ---
     const reply = await generateChatResponse(doc.extractedText, message.trim());
 

@@ -1,7 +1,7 @@
-const { GoogleGenAI } = require('@google/genai');
+const { HfInference } = require('@huggingface/inference');
 
-// Max characters to send to Gemini as context
-const MAX_CONTEXT_CHARS = 30000;
+// Max characters to send as context (Hugging Face free tier models typically have an 8k-32k context window)
+const MAX_CONTEXT_CHARS = 12000;
 
 /**
  * Find the most relevant paragraphs from the document text based on the user's question.
@@ -12,7 +12,6 @@ const MAX_CONTEXT_CHARS = 30000;
  * @returns {string} - Relevant excerpt(s)
  */
 function findRelevantExcerpts(text, question, maxChars = 3000) {
-  // Split into paragraphs
   const paragraphs = text
     .split(/\n{2,}/)
     .map(p => p.trim())
@@ -20,7 +19,6 @@ function findRelevantExcerpts(text, question, maxChars = 3000) {
 
   if (paragraphs.length === 0) return text.substring(0, maxChars);
 
-  // Extract keywords from the question (ignore stop words)
   const stopWords = new Set(['what', 'when', 'where', 'who', 'which', 'how', 'why', 'is', 'are',
     'was', 'were', 'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'of', 'and', 'or',
     'about', 'this', 'that', 'with', 'from', 'by', 'do', 'does', 'did', 'book', 'document',
@@ -32,33 +30,27 @@ function findRelevantExcerpts(text, question, maxChars = 3000) {
     .split(/\s+/)
     .filter(w => w.length > 2 && !stopWords.has(w));
 
-  // Score each paragraph by keyword matches
   const scored = paragraphs.map(para => {
     const lowerPara = para.toLowerCase();
     let score = 0;
     for (const kw of keywords) {
-      // Exact word match scores higher
       const regex = new RegExp(`\\b${kw}\\b`, 'gi');
       const matches = (lowerPara.match(regex) || []).length;
       score += matches * 2;
-      // Partial match
       if (lowerPara.includes(kw)) score += 1;
     }
     return { para, score };
   });
 
-  // Sort by score descending
   scored.sort((a, b) => b.score - a.score);
 
-  // Take top paragraphs up to maxChars
   let result = '';
   for (const { para, score } of scored) {
-    if (score === 0) break; // no relevant content
+    if (score === 0) break; 
     if ((result.length + para.length) > maxChars) break;
     result += para + '\n\n';
   }
 
-  // If nothing matched, return the beginning of the document
   if (!result.trim()) {
     result = paragraphs.slice(0, 5).join('\n\n');
   }
@@ -67,76 +59,68 @@ function findRelevantExcerpts(text, question, maxChars = 3000) {
 }
 
 /**
- * Build a simple rule-based answer from the relevant text when no LLM is available.
- * @param {string} context - Relevant text excerpts
- * @param {string} question - User's question
- * @returns {string}
+ * Build a simple rule-based answer when no LLM is available.
  */
 function buildFallbackAnswer(context, question) {
   const lowerQ = question.toLowerCase();
-
-  // Generic question patterns
   const isAboutQuestion = /about|topic|subject|what is this|summary|overview|introduction/.test(lowerQ);
 
+  const keyMsg = '(Note: For full AI answers, add a HF_API_KEY from huggingface.co to backend/.env)';
+
   if (isAboutQuestion && context) {
-    return `Based on the document:\n\n${context.substring(0, 1000)}...\n\n(Note: For more detailed AI-powered answers, please add a valid GEMINI_API_KEY to your backend .env file.)`;
+    return `Based on the document:\n\n${context.substring(0, 1000)}...\n\n${keyMsg}`;
   }
 
   if (!context || context.trim().length === 0) {
-    return "I couldn't find relevant content in this document for your question. Try rephrasing or ask about specific topics mentioned in the document.";
+    return "I couldn't find relevant content in this document for your question. Try rephrasing.";
   }
 
-  return `Here's what I found in the document related to your question:\n\n${context.substring(0, 1500)}...\n\n(Note: For full AI-powered answers, add a valid GEMINI_API_KEY to backend/.env)`;
+  return `Here's what I found in the document related to your question:\n\n${context.substring(0, 1500)}...\n\n${keyMsg}`;
 }
 
 /**
- * Main function: tries Gemini first, falls back to keyword search if API key is missing/invalid.
- * @param {string} documentText - Full extracted text from the PDF
- * @param {string} message - User's question
- * @returns {Promise<string>}
+ * Main function: tries Hugging Face first, falls back to keyword search if API key missing/fails.
  */
 async function generateChatResponse(documentText, message) {
-  const apiKey = process.env.GEMINI_API_KEY;
+  // We'll use the Hugging Face API key
+  const apiKey = process.env.HF_API_KEY;
 
-  // ── Try Gemini if we have a key ──────────────────────────────
-  if (apiKey && apiKey !== 'your_gemini_api_key_here') {
+  if (apiKey && apiKey !== 'your_hf_api_key_here') {
     try {
-      const ai = new GoogleGenAI({ apiKey });
+      const hf = new HfInference(apiKey);
+      console.log('[aiService] Sending request to Hugging Face...');
 
       const context = documentText.length > MAX_CONTEXT_CHARS
         ? documentText.substring(0, MAX_CONTEXT_CHARS)
         : documentText;
 
-      const prompt = `You are an intelligent assistant that answers questions strictly based on the provided document content.
+      const prompt = `You are a helpful assistant. Answer the user's question based strictly on the provided document content. If the answer is not in the text, say you don't know based on the document. Do not make up information.
 
-DOCUMENT CONTENT:
----
+Document Content:
 ${context}
----
 
-USER QUESTION: ${message}
+User Question: ${message}
 
-INSTRUCTIONS:
-- Answer ONLY based on the document content above.
-- If the answer is not found in the document, say "I couldn't find information about that in this document."
-- Be concise and precise. Do NOT make up information.
+Answer:`;
 
-ANSWER:`;
-
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.0-flash-lite',
-        contents: prompt,
+      // We use Qwen2.5 72B Instruct model (fully free on HF Serverless API)
+      const response = await hf.chatCompletion({
+        model: "Qwen/Qwen2.5-72B-Instruct",
+        messages: [{ role: "user", content: prompt }],
+        max_tokens: 500,
+        temperature: 0.2, // low temp for factual extraction
       });
 
-      return response.text;
+      return response.choices[0].message.content.trim();
     } catch (err) {
-      console.warn('[aiService] Gemini API failed, using fallback. Reason:', err.message?.substring(0, 120));
-      // Fall through to keyword-based fallback below
+      console.warn('[aiService] Hugging Face API failed, using fallback. Reason:', err.message?.substring(0, 120));
+      // Fall through to keyword-based fallback
     }
+  } else {
+     console.log('[aiService] No valid HF_API_KEY found, jumping straight to fallback.');
   }
 
   // ── Keyword-based fallback (no API key needed) ───────────────
-  console.log('[aiService] Using keyword-based fallback (no valid Gemini key).');
   const relevantContext = findRelevantExcerpts(documentText, message);
   return buildFallbackAnswer(relevantContext, message);
 }
